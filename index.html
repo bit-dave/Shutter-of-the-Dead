@@ -46,6 +46,14 @@ h1{font-size:40px;margin:0 0 6px;color:#e22;letter-spacing:1px;text-shadow:0 0 1
 #panel p{opacity:.85;line-height:1.4}
 #start{font-size:22px;padding:14px 36px;border-radius:14px;border:0;background:#c11;color:#fff;font-weight:900}
 #status{font-size:13px;opacity:.7;margin-top:12px}
+.small{font-size:12px;opacity:.6;margin-top:8px}
+#go{display:none;max-width:340px;padding:24px;text-align:center}
+#go h1{font-size:36px}#go .big{font-size:22px;margin:10px 0 24px;line-height:1.5}
+#go button{display:block;width:240px;margin:12px auto;font-size:20px;padding:14px;border-radius:14px;border:0;font-weight:900;color:#fff;transition:opacity .3s}
+#again{background:#c11}#resetup{background:#444}#go button:disabled{opacity:.3}
+#setupBox{position:absolute;left:10px;right:10px;top:calc(70px + env(safe-area-inset-top));pointer-events:auto;background:#000a;border-radius:12px;padding:8px 12px;font-size:13px;font-weight:600;display:none}
+#setupBox label{display:flex;align-items:center;gap:8px;margin:4px 0}#setupBox input{flex:1}
+#floorBtn{left:50%;transform:translateX(-50%);bottom:calc(144px + env(safe-area-inset-bottom));background:#264d}
 </style>
 <script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js"}}</script>
 </head><body>
@@ -60,18 +68,30 @@ h1{font-size:40px;margin:0 0 6px;color:#e22;letter-spacing:1px;text-shadow:0 0 1
   <button class="btn" id="recal">RE-CENTER</button>
   <button class="btn" id="mark">MARK BREACH</button>
   <button class="btn" id="begin">BEGIN</button>
+  <button class="btn" id="floorBtn">SET FLOOR</button>
+  <div id="setupBox">
+    <label>Phone height <input id="hgt" type="range" min="0.8" max="2" step="0.05" value="1.4"><span id="hgtV">1.40 m</span></label>
+    <label>Lens FOV <input id="lens" type="range" min="50" max="85" step="1" value="67"><span id="lensV">67°</span></label>
+    <label>Video sync <input id="lag" type="range" min="0" max="250" step="10" value="90"><span id="lagV">90 ms</span></label>
+  </div>
 </div>
 <div id="overlay"><div id="panel">
   <h1>SHUTTER<br>OF THE DEAD</h1>
   <p>Your room. Their graveyard.<br>Stand still, hold your phone up, and shoot the dead as they claw out of your floor and smash through your doors.</p>
   <button id="start">START</button>
   <div id="status">Needs camera + motion access</div>
-</div></div>
+  <div class="small">🔊 Turn off silent mode for sound</div>
+  <div class="small">© 2026 Zed Head Games</div>
+</div>
+<div id="go"><h1>YOU GOT EATEN</h1><div class="big" id="goStats"></div>
+  <button id="again">PLAY AGAIN</button><button id="resetup">RE-SETUP ROOM</button>
+  <div class="small">© 2026 Zed Head Games</div></div>
+</div>
 
 <script type="module">
 import * as THREE from "three";
 const $=id=>document.getElementById(id);
-const MAG=8, MAX_HP=5, FLOOR=-1.4, BREACH_DIST=3.5;
+const MAG=8, MAX_HP=5, BREACH_DIST=3.5;let FLOOR=-1.4;
 const S={mode:"title",hp:MAX_HP,ammo:MAG,reloading:false,score:0,combo:0,comboT:0,wave:0,toSpawn:0,spawnT:0,gyro:false,breaches:[],boss:false};
 
 // ---------- renderer ----------
@@ -82,49 +102,85 @@ const scene=new THREE.Scene();
 const camera=new THREE.PerspectiveCamera(65,innerWidth/innerHeight,0.05,60);camera.rotation.order="YXZ";
 scene.add(new THREE.HemisphereLight(0xbbbbcc,0x332211,1.4));
 const dl=new THREE.DirectionalLight(0xffffff,2);dl.position.set(2,5,3);scene.add(dl);
-addEventListener("resize",()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});
+addEventListener("resize",()=>updFov());addEventListener("orientationchange",()=>setTimeout(updFov,300));
 
 // ---------- orientation (3DoF) ----------
 const ori={a:0,b:0,g:0,ok:false}; let yawOff=0; let mouseYaw=0,mousePitch=0;
 const zee=new THREE.Vector3(0,0,1),euler=new THREE.Euler(),q0=new THREE.Quaternion(),q1=new THREE.Quaternion(-Math.sqrt(.5),0,0,Math.sqrt(.5)),qOff=new THREE.Quaternion();
-function onOri(e){if(e.alpha==null)return;ori.a=e.alpha;ori.b=e.beta;ori.g=e.gamma;if(!ori.ok){ori.ok=true;S.gyro=true;setTimeout(recenter,50)}}
+// Each sample is converted to a quaternion immediately (with the screen angle at that time) and kept in a short history,
+// so we can render the pose from ~LAG ms ago: the camera video arrives late, and drawing the "now" pose makes overlays lead the video while turning.
+const hist=[];let LAG=90;
+function onOri(e){if(e.alpha==null)return;ori.a=e.alpha;ori.b=e.beta;ori.g=e.gamma;
+  const q=deviceQuat(new THREE.Quaternion());hist.push({t:performance.now(),q});while(hist.length>60)hist.shift();
+  if(!ori.ok){ori.ok=true;S.gyro=true;setTimeout(recenter,50)}}
+function poseAt(t,out){if(!hist.length)return deviceQuat(out);let i=hist.length-1;while(i>0&&hist[i].t>t)i--;const a=hist[i],b=hist[Math.min(i+1,hist.length-1)];
+  if(b===a||b.t<=a.t)return out.copy(a.q);return out.copy(a.q).slerp(b.q,Math.min(1,Math.max(0,(t-a.t)/(b.t-a.t))))}
 function screenAngle(){return (screen.orientation&&screen.orientation.angle)||window.orientation||0}
 function deviceQuat(out){const d=THREE.MathUtils.DEG2RAD;euler.set(ori.b*d,ori.a*d,-ori.g*d,"YXZ");out.setFromEuler(euler);out.multiply(q1);out.multiply(q0.setFromAxisAngle(zee,-screenAngle()*d));return out}
 const tmpQ=new THREE.Quaternion(),tmpE=new THREE.Euler(0,0,0,"YXZ");
-function recenter(){if(!ori.ok){mouseYaw=0;return}deviceQuat(tmpQ);tmpE.setFromQuaternion(tmpQ,"YXZ");yawOff=tmpE.y}
-function updateCam(){if(ori.ok){deviceQuat(tmpQ);qOff.setFromAxisAngle(new THREE.Vector3(0,1,0),-yawOff);camera.quaternion.copy(qOff).multiply(tmpQ)}else{camera.rotation.set(mousePitch,mouseYaw,0)}}
+function recenter(){if(!ori.ok){mouseYaw=0;return}poseAt(performance.now()-LAG,tmpQ);tmpE.setFromQuaternion(tmpQ,"YXZ");yawOff=tmpE.y}
+const Yax=new THREE.Vector3(0,1,0),tgtQ=new THREE.Quaternion();
+function updateCam(dt){if(ori.ok){poseAt(performance.now()-LAG,tmpQ);qOff.setFromAxisAngle(Yax,-yawOff);tgtQ.copy(qOff).multiply(tmpQ);
+    // light smoothing: ~25ms time constant, snaps instantly on big jumps
+    const k=camera.quaternion.angleTo(tgtQ)>.35?1:1-Math.exp(-dt/0.025);camera.quaternion.slerp(tgtQ,k)}else{camera.rotation.set(mousePitch,mouseYaw,0)}}
+// FOV: match the rear camera as actually displayed (object-fit:cover crops the video). LENS = FOV across the video's long side.
+let LENS=67;function updFov(){const v=$("cam"),W=innerWidth,H=innerHeight;let fov=60;
+  if(v.videoWidth&&v.videoHeight){const sc=Math.max(W/v.videoWidth,H/v.videoHeight),longPx=Math.max(v.videoWidth,v.videoHeight)*sc;
+    const f=(longPx/2)/Math.tan(LENS*Math.PI/360);fov=2*Math.atan((H/2)/f)*180/Math.PI}
+  camera.fov=fov;camera.aspect=W/H;camera.updateProjectionMatrix();renderer.setSize(W,H)}
+$("cam").addEventListener("loadedmetadata",updFov);$("cam").addEventListener("resize",updFov);
 
 // ---------- audio ----------
 let AC;function snd(f,d,type="square",v=.2,slide=0){if(!AC)return;const o=AC.createOscillator(),g=AC.createGain();o.type=type;o.frequency.value=f;if(slide)o.frequency.exponentialRampToValueAtTime(slide,AC.currentTime+d);g.gain.setValueAtTime(v,AC.currentTime);g.gain.exponentialRampToValueAtTime(.001,AC.currentTime+d);o.connect(g).connect(AC.destination);o.start();o.stop(AC.currentTime+d)}
 function noise(d,v=.3){if(!AC)return;const b=AC.createBuffer(1,AC.sampleRate*d,AC.sampleRate),c=b.getChannelData(0);for(let i=0;i<c.length;i++)c[i]=(Math.random()*2-1)*(1-i/c.length);const s=AC.createBufferSource(),g=AC.createGain();g.gain.value=v;s.buffer=b;s.connect(g).connect(AC.destination);s.start()}
 
 // ---------- start ----------
+function unlockAudio(){try{if(navigator.audioSession)navigator.audioSession.type="playback"}catch(e){}
+  if(!AC)AC=new (window.AudioContext||window.webkitAudioContext)();AC.resume&&AC.resume();
+  const b=AC.createBuffer(1,1,22050),s=AC.createBufferSource();s.buffer=b;s.connect(AC.destination);s.start(0)}
+document.addEventListener("visibilitychange",()=>{if(!document.hidden&&AC)AC.resume()});
+addEventListener("pointerdown",()=>{if(AC&&AC.state!=="running")AC.resume()},true);
 $("start").onclick=async()=>{
-  AC=new (window.AudioContext||window.webkitAudioContext)();
+  unlockAudio();
   let st=[];
   try{if(typeof DeviceOrientationEvent!=="undefined"&&DeviceOrientationEvent.requestPermission){const r=await DeviceOrientationEvent.requestPermission();if(r!=="granted")st.push("motion denied")}
     addEventListener("deviceorientation",onOri,true)}catch(e){st.push("motion unavailable")}
   try{const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}},audio:false});const v=$("cam");v.srcObject=s;await v.play()}catch(e){st.push("no camera")}
-  $("status").textContent=st.join(", ");
+  $("status").textContent=st.join(", ");updFov();setTimeout(updFov,500);snd(220,.25,"triangle",.2,440);
   $("overlay").style.display="none";$("hud").style.display="block";
   startSetup();
 };
-function startSetup(){S.mode="setup";S.hp=MAX_HP;S.score=0;S.combo=0;S.wave=0;S.ammo=MAG;
-  for(const z of zombies.slice())killZ(z,true);for(const b of S.breaches)scene.remove(b.mesh);S.breaches=[];
-  $("mark").style.display=$("begin").style.display="block";$("reload").style.display="none";
-  flashMsg(ori.ok||!isTouch()?"Aim at doors/windows<br>tap MARK BREACH, then BEGIN":"Aim with drag. Mark breaches, then BEGIN",4000);hud()}
+function resetRun(){S.hp=MAX_HP;S.score=0;S.combo=0;S.wave=0;S.ammo=MAG;S.reloading=false;S.toSpawn=0;
+  for(const z of zombies.slice())killZ(z,true);for(const b of S.breaches){b.hp=0;if(b.crack){scene.remove(b.crack);b.crack=null}}
+  for(const p of parts)scene.remove(p);parts.length=0;$("dmg").style.opacity=0}
+function startSetup(){resetRun();S.mode="setup";for(const b of S.breaches){scene.remove(b.mesh)}S.breaches=[];
+  ["mark","begin","floorBtn"].forEach(i=>$(i).style.display="block");$("setupBox").style.display="block";$("reload").style.display="none";ghost.visible=false;ring.visible=false;
+  flashMsg("1) Point at the floor near your feet, tap SET FLOOR<br>2) Aim at doors/windows, tap MARK BREACH<br>3) BEGIN",5000);hud()}
+// floor plane + calibration ghost
+const ring=new THREE.Mesh(new THREE.RingGeometry(.25,.32,32),new THREE.MeshBasicMaterial({color:0x33ff66,transparent:true,opacity:.7,side:2,depthWrite:false}));ring.rotation.x=-Math.PI/2;scene.add(ring);ring.visible=false;
+let ghost;function setFloor(h){FLOOR=-h;$("hgtV").textContent=h.toFixed(2)+" m";ring.position.y=FLOOR+.01;if(ghost)ghost.position.y=FLOOR;
+  for(const b of S.breaches)placeBreach(b);try{localStorage.sotdH=h}catch(e){}}
+function aimFloorPoint(){const d=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);if(d.y>-.15)return null;const t=FLOOR/d.y;return new THREE.Vector3(d.x*t,FLOOR,d.z*t)}
+$("floorBtn").onclick=e=>{e.stopPropagation();const d=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+  if(d.y>-.3)return flashMsg("Point DOWN at the floor<br>near your feet first",2000);
+  const p=aimFloorPoint();ring.position.set(p.x,FLOOR+.01,p.z);ring.visible=true;ghost.position.set(p.x*2.2,FLOOR,p.z*2.2);ghost.lookAt(0,FLOOR,0);ghost.visible=true;S.floorSet=true;snd(500,.1,"triangle");
+  flashMsg("Floor set. If the green ring / ghost<br>floats or sinks, adjust Phone height",3000)};
+$("hgt").oninput=e=>setFloor(+e.target.value);$("lens").oninput=e=>{LENS=+e.target.value;$("lensV").textContent=LENS+"°";updFov();try{localStorage.sotdL=LENS}catch(e){}};
+$("lag").oninput=e=>{LAG=+e.target.value;$("lagV").textContent=LAG+" ms";try{localStorage.sotdLag=LAG}catch(e){}};
+try{if(localStorage.sotdH)$("hgt").value=localStorage.sotdH;if(localStorage.sotdL){LENS=+localStorage.sotdL;$("lens").value=LENS;$("lensV").textContent=LENS+"°"}if(localStorage.sotdLag){LAG=+localStorage.sotdLag;$("lag").value=LAG;$("lagV").textContent=LAG+" ms"}}catch(e){}
+function placeBreach(b){b.pos.set(b.dir.x*BREACH_DIST,FLOOR+1.0,b.dir.z*BREACH_DIST);b.mesh.position.copy(b.pos);b.mesh.lookAt(0,b.pos.y,0);if(b.crack){b.crack.position.copy(b.pos);b.crack.quaternion.copy(b.mesh.quaternion)}}
 const isTouch=()=>"ontouchstart"in window;
 $("mark").onclick=e=>{e.stopPropagation();if(S.breaches.length>=4)return flashMsg("Max 4 breaches");
-  const dir=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);dir.y=Math.max(-.3,Math.min(.4,dir.y));dir.normalize();
-  const p=dir.multiplyScalar(BREACH_DIST);if(p.y<FLOOR+0.9)p.y=FLOOR+0.9;
-  const m=new THREE.Mesh(new THREE.PlaneGeometry(1,1.8),new THREE.MeshBasicMaterial({color:0xff6600,transparent:true,opacity:.25,side:2,depthWrite:false}));
-  m.position.copy(p);m.lookAt(0,p.y,0);scene.add(m);S.breaches.push({pos:p.clone(),mesh:m,hp:0});snd(600,.1,"triangle");
+  const dir=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);dir.y=0;if(dir.lengthSq()<1e-4)return flashMsg("Aim at the door, not straight up/down");dir.normalize();
+  const m=new THREE.Mesh(new THREE.PlaneGeometry(1,2),new THREE.MeshBasicMaterial({color:0xff6600,transparent:true,opacity:.25,side:2,depthWrite:false}));
+  scene.add(m);const b={dir,pos:new THREE.Vector3(),mesh:m,hp:0};placeBreach(b);S.breaches.push(b);snd(600,.1,"triangle");
   flashMsg("Breach "+S.breaches.length+" marked")};
-$("begin").onclick=e=>{e.stopPropagation();$("mark").style.display=$("begin").style.display="none";$("reload").style.display="block";
-  for(const b of S.breaches)b.mesh.material.opacity=.08;S.mode="play";nextWave()};
+function beginPlay(){["mark","begin","floorBtn"].forEach(i=>$(i).style.display="none");$("setupBox").style.display="none";$("reload").style.display="block";ring.visible=false;ghost.visible=false;
+  for(const b of S.breaches)b.mesh.material.opacity=.08;S.mode="play";nextWave()}
+$("begin").onclick=e=>{e.stopPropagation();beginPlay()};
 $("recal").onclick=e=>{e.stopPropagation();recenter()};
 $("reload").onclick=e=>{e.stopPropagation();reload()};
-["mark","begin","recal","reload"].forEach(id=>$(id).addEventListener("pointerdown",e=>e.stopPropagation()));
+["mark","begin","recal","reload","floorBtn","setupBox"].forEach(id=>$(id).addEventListener("pointerdown",e=>e.stopPropagation()));
 
 // ---------- input: tap shoot, two-finger reload (fixed: count active pointers / touches) ----------
 const pointers=new Set();let drag=null;
@@ -213,6 +269,7 @@ function animZed(m,mode,t){const u=m.userData,[aR,aL]=u.arms,[lR,lL]=u.legs;
   u.eye.rotation.x=Math.sin(t*5.3)*.5+(mode==="dig"?.4:0);u.eye.rotation.z=Math.sin(t*3.7)*.45}
 
 function makeZombie(boss){return buildZed(boss)}
+ghost=buildZed(false);ghost.traverse(o=>{if(o.material&&o.material.visible!==false){o.material=o.material.clone();o.material.transparent=true;o.material.opacity=.45}});ghost.visible=false;scene.add(ghost);setFloor(+$("hgt").value);
 function spawn(boss=false){const viaBreach=!boss&&S.breaches.length&&Math.random()<.45;const z={hp:boss?25+S.wave*3:(Math.random()<.2?3:2),boss,state:"",t:0,atk:0,speed:(boss?.35:.45+Math.random()*.3)+S.wave*.03};
   z.mesh=makeZombie(boss);z.max=z.hp;
   if(viaBreach){const b=S.breaches[Math.random()*S.breaches.length|0];z.breach=b;z.state="bang";z.mesh.position.set(b.pos.x*1.15,FLOOR,b.pos.z*1.15);z.mesh.visible=false;b.hp=3}
@@ -236,8 +293,15 @@ function reload(){if(S.reloading||S.ammo===MAG||S.mode!=="play")return;S.reloadi
 // ---------- waves ----------
 function nextWave(){S.wave++;S.toSpawn=3+S.wave*2;S.spawnT=1.5;flashMsg("WAVE "+S.wave,2000);if(S.wave%3===0)setTimeout(()=>S.mode==="play"&&spawn(true),2500);hud()}
 function hurt(){S.hp--;S.combo=0;$("dmg").style.opacity=1;setTimeout(()=>$("dmg").style.opacity=0,250);snd(90,.3,"sawtooth",.3);navigator.vibrate&&navigator.vibrate(150);hud();
-  if(S.hp<=0){S.mode="dead";$("overlay").style.display="flex";$("panel").querySelector("p").innerHTML="You were eaten on wave "+S.wave+".<br>Score: "+S.score;$("start").textContent="AGAIN";
-    $("start").onclick=()=>{$("overlay").style.display="none";startSetup()}}}
+  if(S.hp<=0)gameOver()}
+// Root cause of the "sudden reset": the old game-over reused the START panel, whose big AGAIN button sat right at screen
+// center where the player was tapping to shoot. The next shot-tap hit AGAIN and instantly wiped to setup with score 0.
+function gameOver(){S.mode="dead";S.reloading=false;hud();$("panel").style.display="none";$("go").style.display="block";$("overlay").style.display="flex";
+  $("goStats").innerHTML="Score: <b>"+S.score+"</b><br>Wave reached: <b>"+S.wave+"</b>";
+  $("again").disabled=$("resetup").disabled=true;setTimeout(()=>{$("again").disabled=$("resetup").disabled=false},1500);snd(60,1.2,"sawtooth",.3,30)}
+function closeGo(){$("overlay").style.display="none";$("go").style.display="none";$("hud").style.display="block"}
+$("again").onclick=e=>{e.stopPropagation();if(e.target.disabled)return;closeGo();resetRun();hud();beginPlay()};
+$("resetup").onclick=e=>{e.stopPropagation();if(e.target.disabled)return;closeGo();startSetup()};
 function hud(){$("hearts").textContent="❤".repeat(Math.max(0,S.hp))+"♡".repeat(MAX_HP-Math.max(0,S.hp));$("ammo").textContent=S.reloading?"RELOADING…":"▮".repeat(S.ammo)+"▯".repeat(MAG-S.ammo);
   $("score").textContent=S.score;$("combo").textContent=S.combo>1?"x"+Math.min(S.combo,10)+" COMBO":"";$("wave").textContent=S.wave?"Wave "+S.wave:"Setup"}
 
@@ -247,8 +311,10 @@ const arrows=$("arrows");function updArrows(){let h="";const v=new THREE.Vector3
   const px=innerWidth/2+Math.cos(a)*innerWidth*.42,py=innerHeight/2+Math.sin(a)*innerHeight*.42;h+=`<div style="position:absolute;left:${px}px;top:${py}px;color:#f33;font-size:${z.boss?34:24}px;transform:translate(-50%,-50%) rotate(${a}rad)">➤</div>`}arrows.innerHTML=h}
 
 // ---------- loop ----------
-let last=performance.now();
-function loop(now){requestAnimationFrame(loop);const dt=Math.min(.05,(now-last)/1000);last=now;updateCam();
+let last=performance.now();let paused=false;document.addEventListener("visibilitychange",()=>{paused=document.hidden;last=performance.now()});
+function loop(now){requestAnimationFrame(loop);const dt=Math.min(.05,(now-last)/1000);last=now;try{step(now,dt)}catch(err){console.error(err)}}
+function step(now,dt){updateCam(dt);if(S.mode==="setup"&&ring.visible){}
+  if(paused){renderer.render(scene,camera);return}
   if(S.mode==="play"){
     S.spawnT-=dt;if(S.toSpawn>0&&S.spawnT<=0&&zombies.length<6+S.wave){spawn();S.toSpawn--;S.spawnT=Math.max(.6,2.6-S.wave*.2)}
     if(S.toSpawn<=0&&zombies.length===0)nextWave();
@@ -261,15 +327,15 @@ function loop(now){requestAnimationFrame(loop);const dt=Math.min(.05,(now-last)/
           if(!b.crack){b.crack=new THREE.Mesh(new THREE.PlaneGeometry(1,1.8),new THREE.MeshBasicMaterial({map:glassTex,transparent:true,depthWrite:false,side:2}));b.crack.position.copy(b.pos);b.crack.quaternion.copy(b.mesh.quaternion);scene.add(b.crack)}
           b.crack.scale.setScalar(.5+(3-b.hp)*.25);burst(b.pos,0x8b6b4a,6,1.5);
           if(b.hp<=0){burst(b.pos,0x8b6b4a,30,4);m.visible=true;m.position.set(b.pos.x,FLOOR,b.pos.z);z.state="walk";setTimeout(()=>{if(b.crack){scene.remove(b.crack);b.crack=null}b.mesh.material.opacity=.08},1500)}}}
-      else{const d=Math.hypot(m.position.x,m.position.z);m.lookAt(0,m.position.y,0);
+      else{m.position.y=FLOOR;const d=Math.hypot(m.position.x,m.position.z);m.lookAt(0,m.position.y,0);
         if(d>.9){m.position.x-=m.position.x/d*z.speed*dt;m.position.z-=m.position.z/d*z.speed*dt;animZed(m,"walk",z.t);m.rotateZ(Math.sin(z.t*2.25)*.06)}
-        else{z.atk-=dt;animZed(m,"atk",z.t);if(z.atk<=0){z.atk=z.boss?1:1.6;hurt();if(S.mode!=="play")break}}}}
+        else{z.atk-=dt;animZed(m,"atk",z.t);if(z.atk<=0&&S.mode==="play"){z.atk=z.boss?1:1.6;hurt();if(S.mode!=="play")break}}}}
   }
   for(let i=parts.length-1;i>=0;i--){const p=parts[i],u=p.userData;u.life-=dt;u.v.y-=6*dt;p.position.addScaledVector(u.v,dt);if(p.position.y<FLOOR){p.position.y=FLOOR;u.v.multiplyScalar(.3)}if(u.life<=0){scene.remove(p);parts.splice(i,1)}}
   scene.children.forEach(c=>{if(c.userData.fade){c.material.opacity-=dt*.2;if(c.material.opacity<=0)scene.remove(c)}});
   if(S.mode==="play"||S.mode==="setup")updArrows();
   renderer.render(scene,camera)}
 requestAnimationFrame(loop);
-window.__S=S;
+window.__S=S;window.__cam=camera;window.__ori=ori;window.__gameOver=gameOver;
 </script>
 </body></html>
